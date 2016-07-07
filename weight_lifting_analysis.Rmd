@@ -1,0 +1,146 @@
+---
+title: "Weight Lifting Analysis"
+author: "Brandon Shelton"
+date: "July 6, 2016"
+output: html_document
+---
+
+## Overview
+
+This document walks through the analysis performed and R code executed to accurately predict the correct *classe* type of bicep curl performed by a weight lifter. For additional information on the data used, please visit the "Weight Lifting Exercises Dataset" section at <http://groupware.les.inf.puc-rio.br/har>.
+
+The two datasets made available for this analysis are:
+
+* Training Data:  <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+* Test Data:      <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The abovementioned "Test Data" is missing its output variable (*classe*) because it is intended be used as the model's validation dataset. Thus, the "Training Data" is subset into training and test datasets in order to gauge the model's accuracy.
+
+
+```{r}
+#load required packages, set seed
+library(caret)
+library(data.table)
+set.seed(12345)
+
+#read the pml-training.csv file
+setwd("C:/Users/bshelto1/Documents")
+training_a <- read.csv("./pml-training.csv", header = TRUE)
+
+#create the training and test datasets
+inTrain <- createDataPartition(y = training_a$classe, p = 0.7, list = FALSE)
+training <- training_a[inTrain, ]
+testing <- training_a[-inTrain, ]
+
+```
+
+
+## Pre-Processing
+
+
+#### Removing Irrelevant Predictors
+
+Several of the 159 predictor variables seem to be easily plotted against the categorical *classe* variable for quick correlation recognition. When illustrated in a Scatter Plot Matrix, it is evident that variable *X* is highly correlated wih *classe* and is presumably a row ID. This exploratory analysis has led to the removal of using *X* as a predictor variable.
+
+```{r}
+featurePlot(x = training[, c("user_name", "X", "cvtd_timestamp", "classe")], 
+            y = training$classe, 
+            plot = "pairs")
+```
+```{r}
+training$X <- NULL
+testing$X <- NULL
+```
+
+
+#### Imputing Missing Values
+
+Many of the training dataset's predictor variables contain NA values, which do not work well with categorical machine learning algorithms.  The caret package's "knnImpute" method is used to replace these NA values with the mean values of the most similar looking datapoints, based on other predictor variables. The "knnImpute" method also centers and scales each numeric variable as close as it can to a column mean of 0 and column standard deviation of 1.
+
+```{r}
+pre_obj <- preProcess(training[, -159], method = "knnImpute")
+training2 <- predict(pre_obj, training[, -159])
+testing2 <- predict(pre_obj, testing[, -159])
+```
+
+
+#### Identification of Near Zero Variance Predictors
+
+The nearZeroVar() function identifies predictors with little-to-no predictive value due to their extereme consistency throughout the entire dataset. Near zero variance predictors are then taken out of the dataset to reduce model processing requirements without negating model accuracy. 
+
+```{r}
+nzvar <- subset(nearZeroVar(training2, saveMetrics = TRUE), nzv == TRUE)
+print(nzvar)
+```
+```{r}
+`%ni%` <- Negate(`%in%`)
+training3 <- training2[, names(training2) %ni% rownames(nzvar)]
+testing3 <- testing2[, names(testing2) %ni% rownames(nzvar)]
+```
+
+
+#### Principle Component Analysis
+
+The remaining 121 *numeric* predictors are tested for correlation and combined into weighted predictors through Principle Component Analysis (PCA). Caret's preProcess() function contains a "pca" method for this transformation. Consolidating correlated predictors into a smaller group of combined predictors reduces noise that the larger group of predictors may present, and much like the Near Zero Variance predictor removal, PCA reduces required processing power for model training.
+
+Prior to running the preProcess() function, an analysis of the numeric training predictors confirms that there are a large number of predictor pairings with at least an 80% correlation remaining in the dataset.
+```{r}
+fac_vars <- c("user_name", "cvtd_timestamp")
+training4a <- training3[, names(training3) %ni% fac_vars]
+m <- abs(cor(training4a))
+diag(m) <- 0
+data.table(which(m > 0.8, arr.ind = T))
+```
+
+
+The Principle Component Analysis further reduces the datasets size and noise by combining variables into 37 predictors (35 PCs and 2 factor variables).
+
+```{r}
+pre_pca <- preProcess(training4a, method = "pca")
+training4b <- predict(pre_pca, training4a)
+classe <- training$classe
+training4 <- cbind(training4b, training3[, names(training3) %in% fac_vars], classe)
+
+testing4a <- testing3[, names(testing3) %ni% fac_vars]
+testing4b <- predict(pre_pca, testing4a)
+testing4b <- predict(pre_pca, testing4a)
+testing4 <- cbind(testing4b, testing3[, names(testing3) %in% fac_vars])
+
+dim(training4)
+```
+
+
+
+## Predicting with the Random Forest Model
+
+#### Cross Validation Setting
+
+This analysis is performed using a k-folds cross validation, where k = 10. 10 k-folds was chosen because the data set is large enough for 10 training iterations to deliver a non-biased average estimated out-of-sample error while minimizing the model's required processing power. Additional power is provided through the prescription of parallel processing, allowing the model training to use all but 1 machine core, which will remain reserved for other processing needs.
+
+```{r}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)
+```
+
+#### Random Forest
+
+The Random Forest model was chosen because it is a powerful ensemble algorithm that works well with categorical outputs.
+
+```{r}
+modFit_rf <- train(classe ~ ., method = "rf", data = training4, trControl = fitControl)
+stopCluster(cluster)
+```
+
+
+Using this training model to predict *classe* on the testing dataset results in an accuracy rate of > 96%. The model's sensitivity, specificity, positive predictive value, and negative predictive values are > 90% for every category. Based on the the performance with the testing dataset, I would expect this model's out of sample error to be ~5%, which would result in it being able to predict 19 out of the 20 validation dataset outcomes correctly.
+
+```{r}
+te_predict_rf <- predict(modFit_rf, testing4)
+confusionMatrix(testing$classe, te_predict_rf)
+```
